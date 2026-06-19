@@ -66,14 +66,14 @@ jobs:
 
       # ====================== Sign ======================
       - name: Sign Release APK
-        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
+        if: ${{ env.KEYSTORE_BASE64 != '' }}
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
         run: |
-          echo "$KEYSTORE_BASE64" | base64 --decode > keystore.jks
+          echo "$KEYSTORE_BASE64" | base64 --decode > release.jks
 
           # 查找 unsigned APK
           UNSIGNED_APK=$(find app/build/outputs/apk/release -name "*unsigned*.apk" | head -n 1)
@@ -86,7 +86,7 @@ jobs:
           BUILD_TOOLS=$($ANDROID_HOME/build-tools/*/apksigner --version 2>&1 | head -n1 | awk '{print $NF}' | cut -d/ -f1)
 
           $ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner sign \
-            --ks keystore.jks \
+            --ks release.jks \
             --ks-key-alias "$KEY_ALIAS" \
             --ks-pass "pass:$STORE_PASSWORD" \
             --key-pass "pass:$KEY_PASSWORD" \
@@ -95,7 +95,7 @@ jobs:
 
           echo "SIGNED_APK=$SIGNED_APK" >> $GITHUB_ENV
           echo "✅ Release APK signed successfully: $SIGNED_APK"
-          rm -f keystore.jks
+          rm -f release.jks
 
       # ====================== Upload Artifacts ======================
       - name: Upload Debug APK
