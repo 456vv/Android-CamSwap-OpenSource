@@ -1,110 +1,92 @@
 name: Build CamSwap APK
 
-# ─────────────────────────────────────────────
-#  Triggers
-# ─────────────────────────────────────────────
 on:
   push:
     branches: [ main ]
     tags:
-      - 'v*'            # also fires on version tags like v2.7
+      - 'v*'                    # v2.7、v2.8.1 等版本标签
   pull_request:
     branches: [ main ]
-  workflow_dispatch:    # allows manual trigger from GitHub Actions UI
+  workflow_dispatch:
 
-# ─────────────────────────────────────────────
-#  Permissions
-# ─────────────────────────────────────────────
 permissions:
-  contents: write       # needed to upload release assets
+  contents: write               # 用于创建 Release 和上传资产
 
 jobs:
   build:
     name: Build & Sign APK
-    runs-on: ubuntu-latest   # free GitHub-hosted runner
+    runs-on: ubuntu-latest
 
     steps:
-      # ── 1. Checkout (with Dobby submodule) ──────────────────────────────
       - name: Checkout repository + submodules
         uses: actions/checkout@v4
         with:
-          submodules: recursive   # initialises app/src/main/cpp/third_party/Dobby
-          fetch-depth: 0          # full history (useful for versioning)
+          submodules: recursive
+          fetch-depth: 0
 
-      # ── 2. Java 17 (required by AGP 8.9.0) ─────────────────────────────
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
-          cache: gradle           # caches ~/.gradle between runs
+          cache: gradle
 
-      # ── 3. NDK + CMake (required by Dobby C++ submodule) ────────────────
-      - name: Install NDK and CMake
+      - name: Setup Android SDK + NDK
         uses: android-actions/setup-android@v3
-        # The action installs the Android SDK; we pin specific NDK + CMake below
-      
-      - name: Install specific NDK version
+
+      - name: Install specific NDK & CMake
         run: |
           echo "y" | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager \
             "ndk;27.2.12479018" \
             "cmake;3.22.1"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> $GITHUB_ENV
 
-      # ── 4. Gradle wrapper permissions ───────────────────────────────────
       - name: Make gradlew executable
         run: chmod +x gradlew
 
-      # ── 5. Gradle cache (speeds up subsequent builds significantly) ──────
-      - name: Cache Gradle packages
+      - name: Cache Gradle
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
           key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            gradle-${{ runner.os }}-
+          restore-keys: gradle-${{ runner.os }}-
 
-      # ── 6. Build debug APK (always) ─────────────────────────────────────
-      - name: Build debug APK
+      # ====================== Build ======================
+      - name: Build Debug APK
         run: ./gradlew assembleDebug --stacktrace --no-daemon
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
-      # ── 7. Build release APK (unsigned) ─────────────────────────────────
-      #    Produces app/build/outputs/apk/release/app-release-unsigned.apk
-      - name: Build release APK (unsigned)
+      - name: Build Release APK (unsigned)
         run: ./gradlew assembleRelease --stacktrace --no-daemon
         env:
           ANDROID_NDK_HOME: ${{ env.ANDROID_NDK_HOME }}
 
-      # ── 8. Sign release APK ─────────────────────────────────────────────
-      #    Requires these repo secrets:
-      #      KEYSTORE_BASE64   – base64-encoded .jks keystore file
-      #      KEY_ALIAS         – key alias inside the keystore
-      #      KEY_PASSWORD      – key password
-      #      STORE_PASSWORD    – keystore password
-      #
-      #    To create secrets:
-      #      base64 -w 0 your_keystore.jks | pbcopy   (macOS)
-      #      Then paste into Settings → Secrets → Actions → New secret
-      - name: Sign release APK
-        if: ${{ env.KEYSTORE_BASE64 != '' }}
+      # ====================== Sign ======================
+      - name: Sign Release APK
+        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           STORE_PASSWORD: ${{ secrets.STORE_PASSWORD }}
         run: |
-          echo "$KEYSTORE_BASE64" | base64 --decode > release.jks
+          echo "$KEYSTORE_BASE64" | base64 --decode > keystore.jks
 
-          # Find the unsigned APK (handles single or split ABIs)
-          UNSIGNED_APK=$(find app/build/outputs/apk/release -name "*unsigned*.apk" | head -1)
+          # 查找 unsigned APK
+          UNSIGNED_APK=$(find app/build/outputs/apk/release -name "*unsigned*.apk" | head -n 1)
+          if [ -z "$UNSIGNED_APK" ]; then
+            echo "❌ Unsigned APK not found!"
+            exit 1
+          fi
+
           SIGNED_APK="${UNSIGNED_APK/unsigned/signed}"
+          BUILD_TOOLS=$($ANDROID_HOME/build-tools/*/apksigner --version 2>&1 | head -n1 | awk '{print $NF}' | cut -d/ -f1)
 
-          $ANDROID_HOME/build-tools/$(ls $ANDROID_HOME/build-tools | sort -V | tail -1)/apksigner sign \
-            --ks release.jks \
+          $ANDROID_HOME/build-tools/$BUILD_TOOLS/apksigner sign \
+            --ks keystore.jks \
             --ks-key-alias "$KEY_ALIAS" \
             --ks-pass "pass:$STORE_PASSWORD" \
             --key-pass "pass:$KEY_PASSWORD" \
@@ -112,36 +94,35 @@ jobs:
             "$UNSIGNED_APK"
 
           echo "SIGNED_APK=$SIGNED_APK" >> $GITHUB_ENV
+          echo "✅ Release APK signed successfully: $SIGNED_APK"
+          rm -f keystore.jks
 
-          # Clean up keystore from runner disk
-          rm -f release.jks
-
-      # ── 9. Upload debug APK as workflow artifact ─────────────────────────
-      - name: Upload debug APK artifact
+      # ====================== Upload Artifacts ======================
+      - name: Upload Debug APK
         uses: actions/upload-artifact@v4
         with:
           name: CamSwap-debug-${{ github.sha }}
           path: app/build/outputs/apk/debug/*.apk
           retention-days: 7
 
-      # ── 10. Upload release APK as workflow artifact ──────────────────────
-      - name: Upload release APK artifact
+      - name: Upload Release APK
         uses: actions/upload-artifact@v4
         with:
           name: CamSwap-release-${{ github.sha }}
           path: app/build/outputs/apk/release/*.apk
           retention-days: 30
 
-      # ── 11. Create GitHub Release (only on version tags) ─────────────────
-      #    Pushes APKs to the Releases page automatically when you tag:
-      #      git tag v2.7 && git push origin v2.7
+      # ====================== Create GitHub Release ======================
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            app/build/outputs/apk/release/*.apk
+            app/build/outputs/apk/release/*-signed.apk
+            app/build/outputs/apk/release/*-unsigned.apk
             app/build/outputs/apk/debug/*.apk
+          name: CamSwap ${{ github.ref_name }}
+          tag_name: ${{ github.ref_name }}
           generate_release_notes: true
           draft: false
           prerelease: false
